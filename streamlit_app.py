@@ -89,11 +89,10 @@ if uploaded_file is not None:
                         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                         h, w = gray.shape
                         
-                        # Calculate structural variance (Extremities like hands/feet have extreme black/white contrast)
+                        # Calculate structural variance
                         img_variance = np.var(gray)
                         
-                        # Chest X-rays have a solid lung block in the middle with soft transitions.
-                        # We evaluate the structural ratio of bone tissue vs soft lung tissue via adaptive thresholding.
+                        # Evaluate active bone/tissue occupancy via adaptive thresholding
                         _, thresh = cv2.threshold(gray, 40, 255, cv2.THRESH_BINARY)
                         active_pixel_ratio = np.sum(thresh == 255) / (h * w)
                         
@@ -102,15 +101,12 @@ if uploaded_file is not None:
                         
                         # Multi-level decision block to separate Chest cavity from other body parts
                         if img_variance < 800 or img_variance > 5800:
-                            # Too flat (general non-xray) or too high contrast (hand/foot bone against pitch black)
                             is_valid_chest_xray = False
                             
                         if active_pixel_ratio < 0.25 or active_pixel_ratio > 0.92:
-                            # Chest X-rays have a stable body mass ratio filling 30% to 90% of the viewport frame
                             is_valid_chest_xray = False
                             
                         if blur_score < 10.0 or blur_score > 1200.0:
-                            # Rejects completely blank images, noise artifacts, or extreme sharp non-medical edges
                             is_valid_chest_xray = False
 
                         # ------------------------------------------
@@ -133,9 +129,8 @@ if uploaded_file is not None:
                             normal_score = float(confidence_scores[0])
                             pneumonia_score = float(confidence_scores[1])
                             
-                            # Dynamic Decision Thresholding to ensure zero-tolerance false positives for normal scans
-                            # The model will ONLY flag Pneumonia if the confidence strictly exceeds Normal.
-                            if pneumonia_score > normal_score and pneumonia_score > 0.55:
+                            # Standard Decision Mapping based directly on pure model inference
+                            if pneumonia_score > normal_score:
                                 res_class = "Pneumonia"
                                 st.error(f"Diagnosis: {res_class}")
                                 st.warning("Note: Pneumonia indicators detected within the lung fields. Please consult a radiologist.")
@@ -154,23 +149,41 @@ if uploaded_file is not None:
                         # GENERATE PDF REPORT
                         # ------------------------------------------
                         if "Rejected" not in res_class:
+                            clean_res_class = str(res_class).replace("🫁", "").replace("❌", "").strip()
+                            clean_filename = str(uploaded_file.name).encode('ascii', 'ignore').decode('ascii')
+                            
                             pdf = FPDF()
                             pdf.add_page()
-                            pdf.set_font("Arial", 'B', 16)
-                            pdf.cell(200, 10, txt="Pneumonia Detection Report", ln=True, align='C')
+                            
+                            # Header
+                            pdf.set_font("Arial", 'B', 18)
+                            pdf.cell(200, 15, txt="Pneumonia AI Diagnostic Report", ln=True, align='C')
+                            pdf.set_line_width(0.5)
+                            pdf.line(10, 25, 200, 25)
                             pdf.ln(10)
                             
+                            # Metadata Content
+                            pdf.set_font("Arial", 'B', 12)
+                            pdf.cell(40, 10, txt="File Name:", ln=False)
                             pdf.set_font("Arial", size=12)
-                            pdf.cell(200, 10, txt=f"File Name: {uploaded_file.name}", ln=True, align='L')
-                            pdf.cell(200, 10, txt=f"Diagnosis Result: {res_class}", ln=True, align='L')
+                            pdf.cell(150, 10, txt=clean_filename, ln=True)
                             
-                            pdf_output = pdf.output(dest='S').encode('latin-1')
+                            pdf.set_font("Arial", 'B', 12)
+                            pdf.cell(40, 10, txt="Analysis Result:", ln=False)
+                            pdf.set_font("Arial", size=12)
+                            pdf.cell(150, 10, txt=clean_res_class, ln=True)
+                            
+                            pdf.ln(15)
+                            pdf.set_font("Arial", 'I', 10)
+                            pdf.cell(200, 10, txt="Disclaimer: This is an AI-generated screening assistance report. Please consult a professional medical practitioner.", ln=True, align='L')
+                            
+                            pdf_output = pdf.output(dest='S').encode('latin-1', errors='ignore')
                             
                             st.divider()
                             st.download_button(
                                 label="Download Report", 
                                 data=pdf_output, 
-                                file_name=f"Report_{uploaded_file.name}.pdf", 
+                                file_name=f"Report_{clean_filename}.pdf", 
                                 mime="application/pdf"
                             )
                             
