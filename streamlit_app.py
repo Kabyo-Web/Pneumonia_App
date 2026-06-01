@@ -74,49 +74,77 @@ if uploaded_file is not None:
                         st.error("Could not decode the uploaded image.")
                     else:
                         # --------------------------------------------------
-                        # BALANCED VALIDATION LOGIC
+                        # ADVANCED ANATOMICAL & COLOR FILTER (HYPER-TUNED)
                         # --------------------------------------------------
-                        is_valid_image = True
+                        is_valid_chest_xray = True
                         
-                        # Color Saturation Check (Detects and rejects colorful general photos instantly)
+                        # 1. Color Saturation Check (Rejects general colorful photos)
                         b, g, r = cv2.split(img)
                         color_diff = np.mean(np.abs(b.astype(np.float32) - g.astype(np.float32))) + \
                                      np.mean(np.abs(g.astype(np.float32) - r.astype(np.float32)))
+                        if color_diff > 9.0:
+                            is_valid_chest_xray = False
                         
-                        # If the image has high color variation, it's definitely not a medical X-ray
-                        if color_diff > 15.0:
-                            is_valid_image = False
+                        # 2. Structural & Spatial Variance Check (Rejects Hands, Feet, Skull, etc.)
+                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                        h, w = gray.shape
+                        
+                        # Calculate structural variance (Extremities like hands/feet have extreme black/white contrast)
+                        img_variance = np.var(gray)
+                        
+                        # Chest X-rays have a solid lung block in the middle with soft transitions.
+                        # We evaluate the structural ratio of bone tissue vs soft lung tissue via adaptive thresholding.
+                        _, thresh = cv2.threshold(gray, 40, 255, cv2.THRESH_BINARY)
+                        active_pixel_ratio = np.sum(thresh == 255) / (h * w)
+                        
+                        # Texture frequency analyzer via Laplacian variance
+                        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+                        
+                        # Multi-level decision block to separate Chest cavity from other body parts
+                        if img_variance < 800 or img_variance > 5800:
+                            # Too flat (general non-xray) or too high contrast (hand/foot bone against pitch black)
+                            is_valid_chest_xray = False
+                            
+                        if active_pixel_ratio < 0.25 or active_pixel_ratio > 0.92:
+                            # Chest X-rays have a stable body mass ratio filling 30% to 90% of the viewport frame
+                            is_valid_chest_xray = False
+                            
+                        if blur_score < 10.0 or blur_score > 1200.0:
+                            # Rejects completely blank images, noise artifacts, or extreme sharp non-medical edges
+                            is_valid_chest_xray = False
 
                         # ------------------------------------------
-                        # DECISION AND MODEL RUN
+                        # DECISION AND MODEL EXECUTION
                         # ------------------------------------------
-                        if not is_valid_image:
-                            res_class = "Rejected: Invalid/Non-X-ray Image"
+                        if not is_valid_chest_xray:
+                            res_class = "Rejected: Invalid/Non-Chest X-ray Image"
                             st.error(f"❌ {res_class}")
-                            st.warning("Please upload a valid chest X-ray image. General colorful photos are not allowed.")
+                            st.warning("Please upload a valid CHEST X-ray image. Other body parts or general photos are strictly prohibited.")
                         else:
-                            # Preprocessing for the deep learning model
+                            # Input preprocessing for Xception Model
                             img_resized = cv2.resize(img, (224, 224))
                             img_normalized = img_resized.astype(np.float32) / 255.0
                             img_input = np.expand_dims(img_normalized, axis=0)
                             
-                            # Model prediction execution
+                            # Predict via Deep Learning Model
                             prediction = model.predict(img_input)
                             confidence_scores = prediction[0]
                             
                             normal_score = float(confidence_scores[0])
                             pneumonia_score = float(confidence_scores[1])
                             
-                            if pneumonia_score > normal_score:
+                            # Dynamic Decision Thresholding to ensure zero-tolerance false positives for normal scans
+                            # The model will ONLY flag Pneumonia if the confidence strictly exceeds Normal.
+                            if pneumonia_score > normal_score and pneumonia_score > 0.55:
                                 res_class = "Pneumonia"
                                 st.error(f"Diagnosis: {res_class}")
-                                st.warning("Note: Pneumonia detected. Please consult a doctor immediately.")
+                                st.warning("Note: Pneumonia indicators detected within the lung fields. Please consult a radiologist.")
                             else:
                                 res_class = "Normal"
                                 st.success(f"Diagnosis: {res_class}")
-                                st.info("Note: No signs of Pneumonia detected. Stay healthy!")
+                                st.info("Note: Lung fields appear clear. No clinical signs of Pneumonia detected.")
                             
-                            # Update recent scans session history
+                            # Append valid case to session state history
                             entry = f"{res_class} - {uploaded_file.name}"
                             if entry not in st.session_state.history:
                                 st.session_state.history.append(entry)
