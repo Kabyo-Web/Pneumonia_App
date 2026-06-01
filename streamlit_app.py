@@ -5,7 +5,7 @@ import cv2
 from PIL import Image
 from fpdf import FPDF
 import io
-from model_builder import build_model  # Ensuring your model architecture helper is imported
+from model_builder import build_model 
 
 # ==========================================
 # PAGE CONFIGURATION
@@ -21,7 +21,7 @@ if 'history' not in st.session_state:
 # ==========================================
 @st.cache_resource
 def load_prediction_model():
-    # Build the Xception model and load weights locally
+    # Build the Xception model architecture and load weights locally
     model = build_model(input_shape=(224, 224, 3), num_classes=3)
     model.load_weights('best_xception_model.keras')
     return model
@@ -55,42 +55,83 @@ uploaded_file = st.file_uploader("Choose an x-ray image...", type=["jpg", "png",
 
 if uploaded_file is not None:
     try:
-        # 1. Safely extract bytes and display image without pointer lock issues
         file_bytes = uploaded_file.getvalue()
         bytes_stream = io.BytesIO(file_bytes)
         image = Image.open(bytes_stream)
         
         col1, col2 = st.columns([1, 1])
         with col1:
-            st.image(image, caption='Uploaded X-ray', use_column_width=True)
+            st.image(image, caption='Uploaded Image', use_column_width=True)
         
         with col2:
             if st.button("Analyze Image"):
                 with st.spinner('Analyzing locally...'):
                     
-                    # Convert bytes to OpenCV image format
                     nparr = np.frombuffer(file_bytes, np.uint8)
                     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     
                     if img is None:
                         st.error("Could not decode the uploaded image.")
                     else:
-                        # 2. VALIDATION: Edge detection filter
-                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                        edges = cv2.Canny(gray, 100, 200)
-                        edge_density = np.sum(edges) / (img.shape[0] * img.shape[1])
+                        # --------------------------------------------------
+                        # STRICT FILTER: CHEST X-RAY VALIDATION LOGIC
+                        # --------------------------------------------------
+                        is_valid_chest_xray = True
                         
-                        if edge_density > 10.0:
-                            res_class = "Rejected: Invalid/Non-X-ray Image"
+                        # 1. Color Saturation Check (Filters out regular colorful images)
+                        b, g, r = cv2.split(img)
+                        color_diff = np.mean(np.abs(b.astype(np.float32) - g.astype(np.float32))) + \
+                                     np.mean(np.abs(g.astype(np.float32) - r.astype(np.float32)))
+                        if color_diff > 8.0:
+                            is_valid_chest_xray = False
+                        
+                        # 2. Image Edge and Texture Filter
+                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                        edges = cv2.Canny(gray, 50, 150)
+                        edge_density = np.sum(edges) / (img.shape[0] * img.shape[1])
+                        if edge_density > 4.5:
+                            is_valid_chest_xray = False
+                            
+                        # 3. Anatomical Region Analysis (Filters out other body part X-rays)
+                        # Valid chest X-rays exhibit specific contrast variations due to the central spine/heart 
+                        # structure and bilateral dark lung fields. Extremities or skull X-rays break this pattern.
+                        h, w = gray.shape
+                        mid_x = w // 2
+                        mid_y = h // 2
+                        
+                        # Measure mean brightness in the central region of interest (ROI)
+                        center_roi = gray[int(h*0.3):int(h*0.7), int(w*0.3):int(w*0.7)]
+                        center_mean = np.mean(center_roi)
+                        
+                        # Measure background brightness at the upper corners
+                        corner_top_left = np.mean(gray[0:int(h*0.15), 0:int(w*0.15)])
+                        corner_top_right = np.mean(gray[0:int(h*0.15), int(w*0.85):w])
+                        
+                        # Calculate bone-to-background pixel ratio using a fixed binary threshold
+                        _, thresh = cv2.threshold(gray, 30, 255, cv2.THRESH_BINARY)
+                        bone_pixels = np.sum(thresh == 255) / (h * w)
+                        
+                        # Strict heuristic checks to isolate chest structure and reject skull, hand, or foot X-rays
+                        if center_mean < 40 or center_mean > 210: 
+                            is_valid_chest_xray = False
+                        if corner_top_left > 150 or corner_top_right > 150: 
+                            is_valid_chest_xray = False
+                        if bone_pixels < 0.20 or bone_pixels > 0.85: 
+                            is_valid_chest_xray = False
+
+                        # ------------------------------------------
+                        # DECISION AND MODEL RUN
+                        # ------------------------------------------
+                        if not is_valid_chest_xray:
+                            res_class = "Rejected: Invalid/Non-Chest X-ray Image"
                             st.error(f"❌ {res_class}")
-                            st.warning("Please upload a valid chest X-ray image to get a diagnosis.")
+                            st.warning("Please upload a valid CHEST X-ray image to get a diagnosis. Other body parts or general photos are not allowed.")
                         else:
-                            # 3. PREPROCESSING FOR MODEL
+                            # Model execution triggers only if the image passes all structural chest verification filters
                             img_resized = cv2.resize(img, (224, 224))
                             img_normalized = img_resized.astype(np.float32) / 255.0
                             img_input = np.expand_dims(img_normalized, axis=0)
                             
-                            # 4. DIRECT MODEL PREDICTION
                             prediction = model.predict(img_input)
                             confidence_scores = prediction[0]
                             
@@ -106,13 +147,15 @@ if uploaded_file is not None:
                                 st.success(f"Diagnosis: {res_class}")
                                 st.info("Note: No signs of Pneumonia detected. Stay healthy!")
                             
-                            # 5. ADD TO HISTORY
+                            # Update recent scans session history
                             entry = f"{res_class} - {uploaded_file.name}"
                             if entry not in st.session_state.history:
                                 st.session_state.history.append(entry)
                                 st.rerun()
                         
-                        # 6. GENERATE PDF REPORT (Only if not rejected)
+                        # ------------------------------------------
+                        # GENERATE PDF REPORT
+                        # ------------------------------------------
                         if "Rejected" not in res_class:
                             pdf = FPDF()
                             pdf.add_page()
